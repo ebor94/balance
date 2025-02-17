@@ -11,39 +11,42 @@ import sys
 class BasculaApp:
     def __init__(self, root):
         self.root = root
-        self.cargar_configuracion()
-        self.root.title(self.config.get('APP', 'title', fallback='BASCULA SERVITECA-PC'))
+        # Inicializar configuración por defecto
+        self.config = configparser.ConfigParser()
+        self.config['APP'] = {
+            'title': 'BASCULA SERVITECA-PC'
+        }
+        self.config['SERIAL'] = {
+            'baudrate': '9600',
+            'timeout': '1'
+        }
+        self.config['API'] = {
+            'url': 'http://localhost:3001/transporte/grabaPeso/'
+        }
+
+        self.root.title(self.config['APP']['title'])
         self.root.geometry("400x300")
+
+        # Variables para monitoreo en tiempo real
+        self.is_monitoring = False
+        self.last_weight = "0.0"
+        self.update_interval = 100  # 100ms = 10 actualizaciones por segundo
 
         # Establecer ícono
         if getattr(sys, 'frozen', False):
-            # Estamos en el ejecutable
             application_path = sys._MEIPASS
         else:
-            # Estamos en desarrollo
             application_path = os.path.dirname(os.path.abspath(__file__))
 
         try:
             icon_path = os.path.join(application_path, 'assets', 'icon.ico')
             self.root.iconbitmap(icon_path)
         except:
-            pass  # Si no encuentra el ícono, continúa sin él
+            pass
 
         self.puerto_serial = None
         self.crear_interfaz()
         self.buscar_puertos()
-
-    def cargar_configuracion(self):
-        """Carga la configuración desde config.ini"""
-        self.config = configparser.ConfigParser()
-        if getattr(sys, 'frozen', False):
-            # Estamos en el ejecutable
-            config_path = os.path.join(sys._MEIPASS, 'config.ini')
-        else:
-            # Estamos en desarrollo
-            config_path = 'config.ini'
-
-        self.config.read(config_path)
 
     def crear_interfaz(self):
         # Estilo
@@ -79,6 +82,16 @@ class BasculaApp:
         )
         self.visor_peso.grid(row=1, column=0, columnspan=3, pady=20)
 
+        # Switch para lectura en tiempo real
+        self.monitoring_var = tk.BooleanVar(value=False)
+        self.monitoring_switch = ttk.Checkbutton(
+            main_frame,
+            text="Lectura en tiempo real",
+            variable=self.monitoring_var,
+            command=self.toggle_monitoring
+        )
+        self.monitoring_switch.grid(row=2, column=0, columnspan=3, pady=5)
+
         # Botón tomar peso
         self.btn_tomar_peso = ttk.Button(
             main_frame,
@@ -86,11 +99,48 @@ class BasculaApp:
             command=self.tomar_peso,
             style='Big.TButton'
         )
-        self.btn_tomar_peso.grid(row=2, column=0, columnspan=3, pady=10, sticky="ew")
+        self.btn_tomar_peso.grid(row=3, column=0, columnspan=3, pady=10, sticky="ew")
 
         # Estado
         self.estado_label = ttk.Label(main_frame, text="Estado: Desconectado")
-        self.estado_label.grid(row=3, column=0, columnspan=3, pady=5)
+        self.estado_label.grid(row=4, column=0, columnspan=3, pady=5)
+
+    def toggle_monitoring(self):
+        """Activa o desactiva el monitoreo en tiempo real"""
+        if self.monitoring_var.get():
+            if not self.puerto_serial or not self.puerto_serial.is_open:
+                messagebox.showerror("Error", "Primero conecte el puerto serial")
+                self.monitoring_var.set(False)
+                return
+            self.is_monitoring = True
+            self.estado_label.config(text="Estado: Monitoreando")
+            self.update_weight_reading()
+        else:
+            self.is_monitoring = False
+            self.estado_label.config(text="Estado: Conectado")
+
+    def update_weight_reading(self):
+        """Actualiza la lectura del peso en tiempo real"""
+        if self.is_monitoring:
+            try:
+                if self.puerto_serial.in_waiting:
+                    self.puerto_serial.reset_input_buffer()
+                    datos = self.puerto_serial.readline().decode().strip()
+                    peso = datos.replace("LG", "").replace("Z", "").strip()
+
+                    if peso != self.last_weight:  # Solo actualizar si el peso cambió
+                        self.last_weight = peso
+                        self.visor_peso.config(text=f"{peso} Kg")
+                        # Opcional: enviar automáticamente a la API
+                        # self.enviar_a_api(peso)
+            except Exception as e:
+                self.monitoring_var.set(False)
+                self.is_monitoring = False
+                messagebox.showerror("Error", str(e))
+                return
+
+            # Programar la próxima actualización
+            self.root.after(self.update_interval, self.update_weight_reading)
 
     def buscar_puertos(self):
         puertos = [port.device for port in serial.tools.list_ports.comports()]
@@ -101,6 +151,8 @@ class BasculaApp:
     def conectar_puerto(self):
         try:
             if self.puerto_serial and self.puerto_serial.is_open:
+                self.monitoring_var.set(False)
+                self.is_monitoring = False
                 self.puerto_serial.close()
                 self.btn_conectar.config(text="Conectar")
                 self.estado_label.config(text="Estado: Desconectado")
@@ -109,8 +161,8 @@ class BasculaApp:
             puerto = self.puerto_combo.get()
             self.puerto_serial = serial.Serial(
                 port=puerto,
-                baudrate=self.config.getint('SERIAL', 'baudrate', fallback=9600),
-                timeout=self.config.getint('SERIAL', 'timeout', fallback=1)
+                baudrate=int(self.config['SERIAL']['baudrate']),
+                timeout=int(self.config['SERIAL']['timeout'])
             )
 
             self.btn_conectar.config(text="Desconectar")
@@ -122,27 +174,25 @@ class BasculaApp:
 
     def tomar_peso(self):
         try:
-             if not self.puerto_serial or not self.puerto_serial.is_open:
-                 messagebox.showerror("Error", "Puerto no conectado")
-                 return
+            if not self.puerto_serial or not self.puerto_serial.is_open:
+                messagebox.showerror("Error", "Puerto no conectado")
+                return
 
-             self.puerto_serial.reset_input_buffer()
-             datos = self.puerto_serial.readline().decode().strip()
+            self.puerto_serial.reset_input_buffer()
+            datos = self.puerto_serial.readline().decode().strip()
+            peso = datos.replace("LG", "").replace("Z", "").strip()
 
-             #Procesar datos según el formato de tu báscula
-             peso = datos.replace("LG", "").replace("Z", "").strip()
-
-             self.visor_peso.config(text=f"{peso} Kg")
-             self.enviar_a_api(peso)
+            self.visor_peso.config(text=f"{peso} Kg")
+            self.enviar_a_api(peso)
 
         except Exception as e:
             messagebox.showerror("Error", f"Error al leer peso: {str(e)}")
 
     def enviar_a_api(self, peso):
         try:
-            url = self.config.get('API', 'url')
+            url = self.config['API']['url']
             datos = {
-                "nombreMaquina" :  "BASCULAPT",
+                "nombreMaquina": "BASCULAPT",
                 "peso": peso,
                 "contador": 17,
             }
